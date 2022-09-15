@@ -1,0 +1,275 @@
+---
+title: "DEMO for Berry lab- RNAseq"
+author: "Min-Ting Lee"
+date: '2022-08-24'
+output: html_document
+---
+# ********
+## READ ME:
+# Below are the cases that you have had the read count data from the TREX facility
+# ********
+
+
+
+#Save the entire list of environments objects
+```{r}
+# save
+save.image(file = "demoBerryLab_RNAseq.RData")
+dir("/Users/min-tinglee/Documents/GitHub/RNAseq") 
+
+#load environment
+load("/Users/min-tinglee/Documents/GitHub/RNAseq/demoBerryLab_RNAseq.RData") 
+```
+
+# Load packages
+```{r}
+library(DESeq2)
+library(ggplot2)
+library(ggpubr)
+library(gplots)
+library(ggrepel)
+library(tidyverse)
+library(dplyr)
+library(RColorBrewer)
+library(ComplexHeatmap)
+library(fgsea)
+library(biomaRt)
+library(org.Mm.eg.db) # for mice
+library(DOSE)
+library(pathview)
+library(clusterProfiler)
+library(AnnotationHub)
+library(enrichplot)
+library(ggnewscale)
+library(KEGGREST)
+library(KEGGgraph)
+```
+
+# =========================================
+# Two groups comparison- Green vs Blue
+# =========================================
+```{r}
+# import gene count table
+GvB <- read_csv("/Users/min-tinglee/Desktop/RNAseq/20220824_BerryLab/subset3_GvsB_norm.count.csv")
+
+# clean to only have gene count
+GvB_count <- GvB[,c(1,4:11)] %>%
+  column_to_rownames(var = "GeneID") %>%
+  as.matrix()
+  
+# import metadata 
+GvB_meta <- read_csv("/Users/min-tinglee/Desktop/RNAseq/20220824_BerryLab/subset3_GvsB_meta.csv")
+
+
+# DESeq2
+GvB_dds <- DESeqDataSetFromMatrix(countData = GvB_count,
+                       colData = GvB_meta,
+                       design = ~Group)
+
+GvB_dds <- DESeq(GvB_dds)
+
+resultsNames(GvB_dds) # lists the coefficients
+
+GvB_res <- results(GvB_dds, name="Group_ATCR4_vs_ATCONT")
+
+
+## Filter to remove genes with a baseMean of 5 or less
+## baseMean is the average expression for that gene across all samples
+GvB_res.5 <- GvB_res[GvB_res$baseMean>5, ]
+
+## Adjust p-value according to Benjamini & Hochberg method (need to do this since we filtered out genes by base mean 5 above)
+GvB_res.5$padj <- p.adjust(GvB_res.5$pvalue, method="BH")
+
+## Remove lines where pvalue is NA
+GvB_res.5 <- GvB_res.5[!is.na(GvB_res.5$pvalue),]
+
+# organize
+GvB_res.5_df <- GvB_res.5 %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "GeneID") %>%
+  mutate(sig = ifelse(pvalue < 0.05, "p<0.05", "p.ns")) %>%
+  mutate(fdr = ifelse(padj < 0.05, "fdr<0.05", "fdr.ns"))
+
+## Write res.cont DESeq data to output file
+write.csv(GvB_res.5_df, file="/Users/min-tinglee/Desktop/RNAseq/20220824_BerryLab/Routput/ATCR4vATCONT_deseq2.csv", quote=F, row.names = F)
+```
+
+# =========================================
+# Heatmap
+# =========================================
+```{r}
+# order results table by the smallest adjusted p value:
+GvB_res.5_order <- GvB_res.5[order(GvB_res.5$padj),]
+
+
+# fdr < 0.05
+GvB_res.5_fdr <- GvB_res.5_df %>%
+  filter(padj<0.05) %>%
+  select("GeneID") # 5316
+
+GvB_res.5_fdr.hmap <- GvB_res.5_fdr %>%
+  left_join(GvB[,c(1,4:11)])
+
+
+GvB_res.5_fdr.hmap2 <- data.matrix(GvB_res.5_fdr.hmap[,2:9])
+
+GvB_res.5_fdr.hmap2_scale <- scale(GvB_res.5_fdr.hmap2) # scale to center data
+
+rownames(GvB_res.5_fdr.hmap2_scale) <- GvB_res.5_fdr.hmap$GeneID
+
+# create color key (optional)
+myCol <- colorRampPalette(rev(RColorBrewer::brewer.pal(n = 7, name = "RdYlBu")))(8)
+
+## Setup annotation file to show the conditions on the figures
+GvB_ann <- GvB_meta %>%
+  column_to_rownames(var = "Sample")
+
+
+## plot
+
+pdf('/Users/min-tinglee/Desktop/RNAseq/20220824_BerryLab/Routput/ATCR4vATCONT_v2.pdf', width = 4, height = 10)
+
+pheatmap(GvB_res.5_fdr.hmap2_scale,
+         color = myCol, 
+         clustering_method = "ward.D2",
+         annotation = GvB_ann,
+         show_rownames = T,
+         fontsize_row = 0.5,
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,
+         scale = "row",
+         main = "fdr<0.05_ward.D2 clustering")
+
+dev.off()
+```
+
+# =========================================
+# Gene Set Analysis
+# =========================================
+```{r}
+# Get human symbol
+GvB.hs <- read_csv("/Users/min-tinglee/Desktop/RNAseq/20220824_BerryLab/subset3_GvsB_humanSymbol.csv")
+
+# Go to GSEA to download the database: 
+pathways.kegg <- gmtPathways("/Users/min-tinglee/Rstudio/MSigDB/c2.cp.kegg.v7.4.symbols.gmt")
+
+## combine with deseq2 res
+GvB_res_df <- GvB_res %>% 
+  as.data.frame() %>%
+  rownames_to_column(var = "GeneID")
+
+GvB_gsea <- inner_join(GvB_res_df, GvB.hs[,c(1,4)], by = "GeneID")
+
+#Further, all you’ll care about later on is the gene symbol and the test statistic. Get just those, and remove the NAs. Finally, if you have multiple test statistics for the same symbol, you’ll want to deal with that in some way. Here I’m just averaging them.
+
+GvB_gsea2 <- GvB_gsea %>%
+  dplyr::select(SYMBOL, stat) %>%  #stat: Wald statistic
+ filter(!SYMBOL == "<none>") %>% 
+  distinct()  %>%
+  group_by(SYMBOL) %>%
+  mutate(stat2 = mean(stat))
+
+GvB_gsea2 <- GvB_gsea2[,c(1,3)] %>%
+  distinct()
+
+  
+#The fgsea() function requires a list of gene sets to check, and a named vector of gene-level statistics, where the names should be the same as the gene names in the pathways list. First, let’s create our named vector of test statistics.  deframe() converts two-column data frames to a named vector or list, using the first column as name and the second column as value.
+
+GvB_gsea2_ranks <- deframe(GvB_gsea2)
+head(GvB_gsea2_ranks)
+
+
+
+## KEGG ##
+GvB_kegg <- fgsea(pathways=pathways.kegg,
+                  stats = GvB_gsea2_ranks,
+                  eps = 0) %>% 
+  as_tibble() %>% 
+  arrange(padj)
+
+
+# flatten list into character for saving as csv
+GvB_kegg$leadingEdge <- vapply(GvB_kegg$leadingEdge, paste, collapse = ", ", character(1L))
+
+write.table(GvB_kegg, file = '/Users/min-tinglee/Desktop/RNAseq/20220824_BerryLab/Routput/ATCR4vATCONT__kegg.csv', qmethod = NULL, sep = ',')
+
+
+## 
+GvB_kegg_genes <- pathways.kegg %>% 
+  enframe("pathway", "SYMBOL") %>% 
+  unnest(cols = SYMBOL) %>% 
+  inner_join(GvB_gsea , by="SYMBOL")
+
+write.table(GvB_kegg_genes, file = '/Users/min-tinglee/Desktop/RNAseq/20220824_BerryLab/Routput/ATCR4vATCONT__keggGenes.csv', qmethod = NULL, sep = ',')
+
+
+# plot- p<0.05
+pdf('/Users/min-tinglee/Desktop/RNAseq/20220824_BerryLab/Routput/ATCR4vATCON_kegg_padj05.pdf', width = 10, height = 10)
+
+GvB_kegg %>%
+  filter(pval < 0.05) %>%
+  mutate(Enrich = ifelse(NES>0, "enrich_ATCR4", "enrich_ATCONT")) %>%
+  as.data.frame() %>%
+  ggbarplot(x = "pathway", y = "NES",
+            fill = "Enrich",
+            color = "white",
+            palette = c("#82c341", "#d54799"), ## change the color
+            sort.val = "asc",
+            sort.by.groups = FALSE,
+            ylab = "Normalized Enrichment Score (NES)",
+            xlab = "Pathway",
+            legend.title = "Kegg pathways ATCR4 v ATCONT",
+            ggtheme = theme_minimal()
+            ) +
+  coord_flip() +
+  font("xy.text", size = 8)
+
+dev.off()
+
+
+```
+
+# =========================================
+# Pathway Analysis
+# =========================================
+```{r}
+###To perform the over-representation analysis, we need a list of background genes and a list of significant genes. For our background dataset we will use all genes tested for differential expression (all genes in our results table). For our significant gene list we will use genes with p-adjusted values less than 0.05 (we could include a fold change threshold too if we have many DE genes).
+
+## Create background dataset for hypergeometric testing using all genes tested for significance in the results                 
+GvB_allOE_genes <- as.character(GvB_res.5_df$GeneID)
+
+## Extract significant results
+GvB_sigOE <- GvB_res.5_df %>%
+  dplyr::filter(padj < 0.05)
+  
+
+# get ENTREZID
+GvB_sigOE$ENTREZID_id = mapIds(org.Mm.eg.db,
+                            keys = GvB_sigOE$GeneID,
+                            column = "ENTREZID",
+                            keytype = "ENSEMBL",
+                            multiVals="first")
+
+# extract
+GvB_sigOE_sigOE_gene <- as.character(GvB_sigOE$ENTREZID_id)
+
+
+
+GvB_kk <- enrichKEGG(gene = GvB_sigOE_sigOE_gene,
+           organism="mmu", 
+           pvalueCutoff=0.05, 
+           pAdjustMethod="BH", 
+           qvalueCutoff=0.1, 
+           #use_internal_data = T
+           )
+
+## an example of taking a look at one path that you are interested in based on the above anlaysis..
+# then you can download it from the webpage.
+
+
+
+# plotting- here is just one example 
+browseKEGG(GvB_kk, "mmu04660")
+```
+
+
