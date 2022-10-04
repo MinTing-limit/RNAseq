@@ -1,0 +1,735 @@
+---
+title: "bt0416_2022.10.03"
+author: "Min-Ting"
+date: "2022-10-04"
+output: html_document
+---
+
+```{r}
+rm(list = ls())
+```
+
+# =====================================
+#Save the entire list of environments objects
+# =====================================
+```{r}
+# save
+save.image(file = "bt0416_20221003.RData")
+dir("/Users/min-tinglee/Desktop/RNAseq/20210811_bt0416.RNAseq")
+
+#load environment
+load("/Users/min-tinglee/Desktop/RNAseq/20210811_bt0416.RNAseq/bt0416_20221003.RData")
+```
+
+```{r}
+library(DESeq2)
+library(ggplot2)
+library(ggpubr)
+library(gplots)
+library(ggrepel)
+library(tidyverse)
+library(RColorBrewer)
+library(dplyr)
+library(ComplexHeatmap)
+library(fgsea)
+library(org.Hs.eg.db)
+library(biomaRt)
+library(ComplexHeatmap)
+
+## packages for clusterProfiler
+library(org.Mm.eg.db)
+library(DOSE)
+library(pathview)
+library(clusterProfiler)
+library(AnnotationHub)
+library(enrichplot)
+library(ggnewscale)
+
+library(KEGGREST)
+library(KEGGgraph)
+```
+
+# metadata
+```{r}
+meta <- read_csv("/Users/min-tinglee/Desktop/RNAseq/20210811_bt0416.RNAseq/bt0416_meta_2022.10.03.csv")
+
+meta <- meta[,c(1,2)]
+```
+
+# =================================
+# Sample Distance: Correlation and PCA plot
+# =================================
+```{r}
+## prepare all samples for dds
+all <- read_csv("/Users/min-tinglee/Desktop/RNAseq/20210811_bt0416.RNAseq/norm.count_ALL.csv")
+
+# make matrix
+all_count <- all[,c(1,12:29)] %>%
+  column_to_rownames(var = "Index") %>%
+  as.matrix()
+  
+  
+
+all_dds <- DESeqDataSetFromMatrix(countData = all_count,
+                       colData = meta,
+                       design = ~Group)
+
+## Perform a rlog transformation on count data (essentially a puts on a log2 scale)
+## This helps our data assume a normal distribution and is good to do before these analyses
+rld <- rlog(all_dds, blind=TRUE)
+
+#  ******************** Sample distance heatmap
+
+## Set color palette for figures
+colors <- colorRampPalette( rev(brewer.pal(9, "BuPu")) )(255)
+
+sampleDists <- dist(t(assay(rld)))# Computes Euclidean distance between samples based on gene expression
+sampleDistMatrix <- as.matrix(sampleDists)
+
+
+## Setup annotation file to show the conditions on the figures
+sample_ann <- meta
+sample_ann <- sample_ann %>% column_to_rownames(var = "SampleID")
+
+
+
+pdf("/Users/min-tinglee/Desktop/RNAseq/20210811_bt0416.RNAseq/Rplot_2022/all_sampleDist_HM.pdf", width = 6, height = 5)
+pheatmap::pheatmap(sampleDistMatrix,
+         clustering_distance_rows=sampleDists,
+         clustering_distance_cols=sampleDists,
+         annotation = sample_ann,
+         col=colors,
+         main="Sample to Sample Distances")
+dev.off()
+
+
+## Principal Component Analysis
+## Separates samples based on variation between sample's gene expression
+## Greater variation will affect separation to a greater degree
+
+all_data <- plotPCA(rld, intgroup=c("Group"), returnData=TRUE)
+percentVar_group <- round(100 * attr(all_data, "percentVar"))
+
+pdf('/Users/min-tinglee/Desktop/RNAseq/20210811_bt0416.RNAseq/Rplot_2022/all_PCA.pdf', width=5, height=4)
+ggplot(all_data, aes(PC1, PC2, color=Group)) +
+  geom_point(size=3.5) +
+  geom_text_repel(aes(label=name)) +
+  scale_color_brewer(palette = "Set2") +
+  theme_bw() +
+  xlab(paste0("PC1: ",percentVar_group[1],"% variance")) +
+  ylab(paste0("PC2: ",percentVar_group[2],"% variance")) +
+  ggtitle("PCA plot")
+dev.off()
+```
+
+
+# =================================
+# Comparison 1: BHIS KO vs WT
+# =================================
+```{r}
+# import gene count table
+com1 <- read_csv("/Users/min-tinglee/Desktop/RNAseq/20210811_bt0416.RNAseq/com1_bhisKOvWT_count.csv")
+
+# make a matrix
+com1_count <- com1[,c(3,12:17)] %>%
+  column_to_rownames(var = "GeneID") %>%   #use NCBI ref
+  as.matrix()
+
+# subset metadata for this comparison
+com1_meta <- meta[c(1:6),c(1,2)]
+
+
+# **************** DESeq2 **************** 
+com1_dds <- DESeqDataSetFromMatrix(countData = com1_count,
+                       colData = com1_meta,
+                       design = ~Group)
+
+com1_dds <- DESeq(com1_dds)
+
+resultsNames(com1_dds) # lists the coefficients
+
+com1_res <- results(com1_dds, contrast = c("Group","bhisWT","bhisKO"))
+
+# View summary of results
+summary(com1_res)
+```
+# ************
+# comparison 1
+# MA plot
+# ************
+```{r}
+# ************* MA plot
+
+pdf(file = "/Users/min-tinglee/Desktop/RNAseq/20210811_bt0416.RNAseq/Rplot_2022/com1_MA.pdf",height=4, width=4)
+plotMA(com1_res)
+dev.off()
+
+# ************* MA plot2 (red dots)
+library(scales) # needed for oob parameter
+library(viridis)
+
+# Coerce to a data frame
+com1_resDF <- as.data.frame(com1_res)
+
+# Examine this data frame
+head(com1_resDF)
+
+# Set a boolean column for significance
+com1_resDF$significant <- ifelse(com1_resDF$padj < 0.05, "FDR<0.05", NA)
+
+# Plot the results similar to DEseq2
+
+pdf(file = "/Users/min-tinglee/Desktop/RNAseq/20210811_bt0416.RNAseq/Rplot_2022/com1_MA2.pdf",height=4, width=6)
+
+ggplot(com1_resDF, aes(baseMean, log2FoldChange, colour=significant)) +
+  geom_point(size=1) + 
+  scale_y_continuous(limits=c(-3, 3), oob=squish) + 
+  scale_x_log10() + 
+  geom_hline(yintercept = 0, colour="tomato1", size=2) + 
+  labs(x="mean of normalized counts", y="log fold change") +
+  scale_colour_manual(name="q-value", 
+                      values=("FDR<0.05"="red"), 
+                      na.value="grey50") +
+  theme_bw()
+
+dev.off()
+
+# ************* MA plot3 (color based on significance)
+
+pdf(file = "/Users/min-tinglee/Desktop/RNAseq/20210811_bt0416.RNAseq/Rplot_2022/com1_MA3.pdf",height=4, width=6)
+
+ggplot(com1_resDF, aes(baseMean, log2FoldChange, colour=padj)) + 
+  geom_point(size=1) + 
+  scale_y_continuous(limits=c(-3, 3), oob=squish) + 
+  scale_x_log10() + 
+  geom_hline(yintercept = 0, colour="black", size=1, linetype="longdash") +
+  labs(x="mean of normalized counts", y="log fold change") +
+  scale_colour_viridis(direction=-1, trans='sqrt') + 
+  theme_bw() + 
+  geom_density_2d(colour="grey", size=0.5)
+
+dev.off()
+```
+
+# ************
+# comparison 1
+# Volcano plot
+# ************
+```{r}
+# with ensemble ID
+com1_log2fc <- read_csv("/Users/min-tinglee/Desktop/RNAseq/20210811_bt0416.RNAseq/com1_log2FC.csv")  # ensemble ID
+
+# ensembl ID as rowname
+com1_log2fc$rowID <- paste(com1_log2fc$Index, "_", com1_log2fc$EnsemblID) # cuz ensembleID is not unique
+
+com1_log2fc.row <- com1_log2fc %>%
+  column_to_rownames(var = "rowID")
+
+## ****************** plot ensemble ID
+
+EnhancedVolcano(com1_log2fc.row ,
+                lab = rownames(com1_log2fc.row),
+                x = "log2FC",
+                y = "padj",
+                title = "Comparison 1: bhisWT vs bhisKO",
+                #pCutoff = 1e-06,
+                FCcutoff = 2,
+                pointSize = 3.0,
+    labSize = 3.0,
+    #colAlpha = 1,
+    legendPosition = 'right',
+    legendLabSize = 12,
+    legendIconSize = 4.0,
+    drawConnectors = TRUE,
+    widthConnectors = 0.5,
+    maxoverlapsConnectors = Inf)
+
+
+ggsave(path = "/Users/min-tinglee/Desktop/RNAseq/20210811_bt0416.RNAseq/Rplot_2022",filename = "com1_volcano.pdf", height=6, width=8, device="pdf")
+```
+
+# ************
+# comparison 1
+# Heatmap
+# ************
+```{r}
+# prepare 
+com1$rowID <- paste(com1$Index, "_", com1$Product)
+
+
+# filter and keep those FDR <0.05
+com1.fdr0.05 <- com1[,c(1,12:18)] %>%
+  left_join(com1_log2fc[,c(1,14:18)], by = "Index") %>%
+  filter(padj < 0.05)
+  
+# save matrix for heatmap
+com1.fdr0.05.simple <- com1.fdr0.05[,c(2:8)] %>%
+  column_to_rownames(var = "rowID") %>%
+  as.matrix()
+
+# zscore: sample column, transcript row
+com1.fdr0.05.simple_z <- zscore(com1.fdr0.05.simple)
+
+# ************** column annotation
+com1.fdr0.05.simple_t <- com1.fdr0.05.simple %>%
+  t() %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "SampleID")
+
+com1.fdr0.05.simple_t <- com1.fdr0.05.simple_t %>%
+  mutate(Treatment = case_when(grepl("b.dBT.TKD", SampleID) ~ "BTtdk_WT",
+                               grepl("b.dBT.0416", SampleID) ~ "BT0416_KO"))
+
+com1_annGroup <- data.frame(com1.fdr0.05.simple_t$Treatment)
+colnames(com1_annGroup) <- c("Group")
+
+#column color
+com1_annGroup.color <- list("Group" = c("BTtdk_WT" = "#e95d5d", 
+                                         "BT0416_KO" = "#808080"))
+
+com1_colAnn <- HeatmapAnnotation(df = com1_annGroup, which = "col", 
+                                 col = com1_annGroup.color, 
+                                 annotation_width = unit(c(1,2), "cm"), 
+                                 gap = unit(1, "mm"), 
+                                 annotation_name_gp= gpar(fontsize = 5))
+
+# ************** row annotation
+# for row annotation log2FC
+com1_row_log2fc <- com1.fdr0.05.simple_z %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "rowID") %>%
+  left_join(com1.fdr0.05[,c(8,10)]) %>%
+  select(rowID, log2FC) %>%
+  column_to_rownames(var = "rowID")
+
+com1_rowAnn = rowAnnotation(log2FC = anno_barplot(com1_row_log2fc$log2FC, 
+                                                  baseline = 0,
+                                                  bar_width = 0.2, 
+                gp = gpar(col = ifelse(com1_row_log2fc$log2FC >0, "grey", "#e33232"),
+                          fill = ifelse(com1_row_log2fc$log2FC >0, "grey", "#e33232"))),
+               width = unit(2, "cm") )
+
+## ************** PLOT 
+
+pdf(file = "/Users/min-tinglee/Desktop/RNAseq/20210811_bt0416.RNAseq/Rplot_2022/com1.heatmap.pearson.pdf",height=10, width=6)
+
+Heatmap(com1.fdr0.05.simple_z,
+        #width = ncol(com2.fdr0.05.simple_z)*unit(0.5, "mm"),
+        #height = nrow(com2.fdr0.05.simple_z)*unit(0.5, "mm"),
+        name = "z_counts",
+        clustering_distance_rows = "pearson",
+        col = colorRamp2(c(-2,0,2), c("navy", "white","firebrick3")),
+        row_names_gp = grid::gpar(fontsize = 1),
+        column_names_gp = grid::gpar(fontsize = 5),
+        top_annotation = com1_colAnn,
+        right_annotation = com1_rowAnn)
+dev.off()
+
+```
+
+# =================================
+# Comparison 2: cholminWT vs cholminKO
+# =================================
+```{r}
+# import gene count table
+com2 <- read_csv("/Users/min-tinglee/Desktop/RNAseq/20210811_bt0416.RNAseq/com2_cholminWTvKO_count.csv")
+
+# make a matrix
+com2_count <- com2[,c(3,12:17)] %>%
+  column_to_rownames(var = "GeneID") %>%   #use NCBI ref
+  as.matrix()
+
+# subset metadata for this comparison
+com2_meta <- meta[c(13:18),c(1,2)]
+
+
+# **************** DESeq2 **************** 
+com2_dds <- DESeqDataSetFromMatrix(countData = com2_count,
+                       colData = com2_meta,
+                       design = ~Group)
+
+com2_dds <- DESeq(com2_dds)
+
+resultsNames(com2_dds) # lists the coefficients
+
+com2_res <- results(com2_dds, contrast = c("Group","cholminWT","cholminKO"))
+
+# View summary of results
+summary(com2_res)
+```
+# ************
+# comparison 2
+# MA plot
+# ************
+```{r}
+# ************* MA plot
+
+pdf(file = "/Users/min-tinglee/Desktop/RNAseq/20210811_bt0416.RNAseq/Rplot_2022/com2_MA.pdf",height=4, width=4)
+plotMA(com2_res, ylim=c(-3,3))
+dev.off()
+
+# ************* MA plot2 (red dots)
+
+# Coerce to a data frame
+com2_resDF <- as.data.frame(com2_res)
+
+# Examine this data frame
+head(com2_resDF)
+
+# Set a boolean column for significance
+com2_resDF$significant <- ifelse(com2_resDF$padj < 0.05, "FDR<0.05", NA)
+
+# Plot the results similar to DEseq2
+
+pdf(file = "/Users/min-tinglee/Desktop/RNAseq/20210811_bt0416.RNAseq/Rplot_2022/com2_MA2.pdf",height=4, width=6)
+
+ggplot(com2_resDF, aes(baseMean, log2FoldChange, colour=significant)) +
+  geom_point(size=1) + 
+  scale_y_continuous(limits=c(-3, 3), oob=squish) + 
+  scale_x_log10() + 
+  geom_hline(yintercept = 0, colour="tomato1", size=2) + 
+  labs(x="mean of normalized counts", y="log fold change") +
+  scale_colour_manual(name="q-value", 
+                      values=("FDR<0.05"="red"), 
+                      na.value="grey50") +
+  theme_bw()
+
+dev.off()
+
+# ************* MA plot3 (color based on significance)
+
+pdf(file = "/Users/min-tinglee/Desktop/RNAseq/20210811_bt0416.RNAseq/Rplot_2022/com2_MA3.pdf",height=4, width=6)
+
+ggplot(com2_resDF, aes(baseMean, log2FoldChange, colour=padj)) + 
+  geom_point(size=1) + 
+  scale_y_continuous(limits=c(-3, 3), oob=squish) + 
+  scale_x_log10() + 
+  geom_hline(yintercept = 0, colour="black", size=1, linetype="longdash") +
+  labs(x="mean of normalized counts", y="log fold change") +
+  scale_colour_viridis(direction=-1, trans='sqrt') + 
+  theme_bw() + 
+  geom_density_2d(colour="grey", size=0.5)
+
+dev.off()
+```
+# ************
+# comparison 2
+# Volcano plot
+# ************
+```{r}
+# with ensemble ID
+com2_log2fc <- read_csv("/Users/min-tinglee/Desktop/RNAseq/20210811_bt0416.RNAseq/ens_comparison2_minCHOL.dBT0416vTDK.csv")  # ensemble ID
+
+# ensembl ID as rowname
+com2_log2fc$rowID <- paste(com2_log2fc$Index, "_", com2_log2fc$EnsemblID) # cuz ensembleID is not unique
+
+com2_log2fc.row <- com2_log2fc %>%
+  column_to_rownames(var = "rowID")
+
+## ****************** plot ensemble ID
+
+EnhancedVolcano(com2_log2fc.row ,
+                lab = rownames(com2_log2fc.row),
+                x = "log2_FC",
+                y = "padj",
+                title = "Comparison 2: cholminWT vs cholminKO",
+                #pCutoff = 1e-06,
+                FCcutoff = 2,
+                pointSize = 3.0,
+    labSize = 1.5,
+    #colAlpha = 1,
+    legendPosition = 'right',
+    legendLabSize = 12,
+    legendIconSize = 4.0,
+    drawConnectors = TRUE,
+    widthConnectors = 0.5,
+    maxoverlapsConnectors = Inf)
+
+
+ggsave(path = "/Users/min-tinglee/Desktop/RNAseq/20210811_bt0416.RNAseq/Rplot_2022",filename = "com2_volcano.pdf", height=6, width=8, device="pdf")
+```
+
+# ************
+# comparison 2
+# Heatmap
+# ************
+```{r}
+# prepare 
+com2$rowID <- paste(com2$Index, "_", com2$Product)
+
+
+# filter and keep those FDR <0.05
+com2.fdr0.05 <- com2[,c(1,12:18)] %>%
+  left_join(com2_log2fc[,c(1,14:17)], by = "Index") %>%
+  filter(padj < 0.05)
+  
+# save matrix for heatmap
+com2.fdr0.05.simple <- com2.fdr0.05[,c(2:8)] %>%
+  column_to_rownames(var = "rowID") %>%
+  as.matrix()
+
+# zscore: sample column, transcript row
+com2.fdr0.05.simple_z <- zscore(com2.fdr0.05.simple)
+
+# ************** column annotation
+com2.fdr0.05.simple_t <- com2.fdr0.05.simple %>%
+  t() %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "SampleID")
+
+com2.fdr0.05.simple_t <- com2.fdr0.05.simple_t %>%
+  mutate(Treatment = case_when(grepl("c.dBT.TKD", SampleID) ~ "BTtdk_WT",
+                               grepl("c.dBT.0416", SampleID) ~ "BT0416_KO"))
+
+com2_annGroup <- data.frame(com2.fdr0.05.simple_t$Treatment)
+colnames(com2_annGroup) <- c("Group")
+
+#column color
+com2_annGroup.color <- list("Group" = c("BTtdk_WT" = "#e95d5d", 
+                                         "BT0416_KO" = "#808080"))
+
+com2_colAnn <- HeatmapAnnotation(df = com2_annGroup, which = "col", 
+                                 col = com2_annGroup.color, 
+                                 annotation_width = unit(c(1,2), "cm"), 
+                                 gap = unit(1, "mm"), 
+                                 annotation_name_gp= gpar(fontsize = 5))
+
+# ************** row annotation
+# for row annotation log2FC
+com2_row_log2fc <- com2.fdr0.05.simple_z %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "rowID") %>%
+  left_join(com2.fdr0.05[,c(8,9)]) %>%
+  select(rowID, log2_FC) %>%
+  column_to_rownames(var = "rowID")
+
+com2_rowAnn = rowAnnotation(log2FC = anno_barplot(com2_row_log2fc$log2_FC, 
+                                                  baseline = 0,
+                                                  bar_width = 0.2, 
+                gp = gpar(col = ifelse(com2_row_log2fc$log2_FC >0, "grey", "#e33232"),
+                          fill = ifelse(com2_row_log2fc$log2_FC >0, "grey", "#e33232"))),
+               width = unit(2, "cm") )
+
+## ************** PLOT 
+
+pdf(file = "/Users/min-tinglee/Desktop/RNAseq/20210811_bt0416.RNAseq/Rplot_2022/com2.heatmap.pearson.pdf",height=10, width=6)
+
+Heatmap(com2.fdr0.05.simple_z,
+        #width = ncol(com2.fdr0.05.simple_z)*unit(0.5, "mm"),
+        #height = nrow(com2.fdr0.05.simple_z)*unit(0.5, "mm"),
+        name = "z_counts",
+        clustering_distance_rows = "pearson",
+        col = colorRamp2(c(-2,0,2), c("navy", "white","firebrick3")),
+        row_names_gp = grid::gpar(fontsize = 1),
+        column_names_gp = grid::gpar(fontsize = 5),
+        top_annotation = com2_colAnn,
+        right_annotation = com2_rowAnn)
+dev.off()
+
+```
+
+
+# =================================
+# Comparison 3: minKO vs minWT
+# =================================
+```{r}
+# import gene count table
+com3 <- read_csv("/Users/min-tinglee/Desktop/RNAseq/20210811_bt0416.RNAseq/com3_minWTvKO_count.csv")
+
+# make a matrix
+com3_count <- com3[,c(3,12:17)] %>%
+  column_to_rownames(var = "GeneID") %>%   #use NCBI ref
+  as.matrix()
+
+# subset metadata for this comparison
+com3_meta <- meta[c(7:12),c(1,2)]
+
+
+# **************** DESeq2 **************** 
+com3_dds <- DESeqDataSetFromMatrix(countData = com3_count,
+                       colData = com3_meta,
+                       design = ~Group)
+
+com3_dds <- DESeq(com3_dds)
+
+resultsNames(com3_dds) # lists the coefficients
+
+com3_res <- results(com3_dds, contrast = c("Group","minWT","minKO"))
+
+# View summary of results
+summary(com3_res)
+```
+
+
+# ************
+# comparison 3
+# MA plot
+# ************
+```{r}
+# ************* MA plot
+
+pdf(file = "/Users/min-tinglee/Desktop/RNAseq/20210811_bt0416.RNAseq/Rplot_2022/com3_MA.pdf",height=4, width=4)
+plotMA(com3_res)
+dev.off()
+
+# ************* MA plot2 (red dots)
+
+# Coerce to a data frame
+com3_resDF <- as.data.frame(com3_res)
+
+# Examine this data frame
+head(com3_resDF)
+
+# Set a boolean column for significance
+com3_resDF$significant <- ifelse(com3_resDF$padj < 0.05, "FDR<0.05", NA)
+
+# Plot the results similar to DEseq2
+
+pdf(file = "/Users/min-tinglee/Desktop/RNAseq/20210811_bt0416.RNAseq/Rplot_2022/com3_MA2.pdf",height=4, width=6)
+
+ggplot(com3_resDF, aes(baseMean, log2FoldChange, colour=significant)) +
+  geom_point(size=1) + 
+  scale_y_continuous(limits=c(-3, 3), oob=squish) + 
+  scale_x_log10() + 
+  geom_hline(yintercept = 0, colour="tomato1", size=2) + 
+  labs(x="mean of normalized counts", y="log fold change") +
+  scale_colour_manual(name="q-value", 
+                      values=("FDR<0.05"="red"), 
+                      na.value="grey50") +
+  theme_bw()
+
+dev.off()
+
+# ************* MA plot3 (color based on significance)
+
+pdf(file = "/Users/min-tinglee/Desktop/RNAseq/20210811_bt0416.RNAseq/Rplot_2022/com3_MA3.pdf",height=4, width=6)
+
+ggplot(com3_resDF, aes(baseMean, log2FoldChange, colour=padj)) + 
+  geom_point(size=1) + 
+  scale_y_continuous(limits=c(-3, 3), oob=squish) + 
+  scale_x_log10() + 
+  geom_hline(yintercept = 0, colour="black", size=1, linetype="longdash") +
+  labs(x="mean of normalized counts", y="log fold change") +
+  scale_colour_viridis(direction=-1, trans='sqrt') + 
+  theme_bw() + 
+  geom_density_2d(colour="grey", size=0.5)
+
+dev.off()
+```
+
+# ************
+# comparison 3
+# Volcano plot
+# ************
+```{r}
+# with ensemble ID
+com3_log2fc <- read_csv("/Users/min-tinglee/Desktop/RNAseq/20210811_bt0416.RNAseq/ens_comparison3_min.dBT0416vTDK.csv")  # ensemble ID
+
+# ensembl ID as rowname
+com3_log2fc$rowID <- paste(com3_log2fc$Index, "_", com3_log2fc$EnsemblID) # cuz ensembleID is not unique
+
+com3_log2fc.row <- com3_log2fc %>%
+  column_to_rownames(var = "rowID")
+
+## ****************** plot ensemble ID
+
+EnhancedVolcano(com3_log2fc.row ,
+                lab = rownames(com3_log2fc.row),
+                x = "log2_FC",
+                y = "padj",
+                title = "Comparison 3: minWT vs minKO",
+                #pCutoff = 1e-06,
+                FCcutoff = 2,
+                pointSize = 3.0,
+    labSize = 1.5,
+    #colAlpha = 1,
+    legendPosition = 'right',
+    legendLabSize = 12,
+    legendIconSize = 4.0,
+    drawConnectors = TRUE,
+    widthConnectors = 0.5,
+    maxoverlapsConnectors = Inf)
+
+
+ggsave(path = "/Users/min-tinglee/Desktop/RNAseq/20210811_bt0416.RNAseq/Rplot_2022",filename = "com3_volcano.pdf", height=6, width=8, device="pdf")
+```
+
+# ************
+# comparison 3
+# Heatmap
+# ************
+```{r}
+# prepare 
+com3$rowID <- paste(com3$Index, "_", com3$Product)
+
+
+# filter and keep those FDR <0.05
+com3.fdr0.05 <- com3[,c(1,12:17,21)] %>%
+  left_join(com3_log2fc[,c(1,14:17)], by = "Index") %>%
+  filter(padj < 0.05)
+  
+# save matrix for heatmap
+com3.fdr0.05.simple <- com3.fdr0.05[,c(2:8)] %>%
+  column_to_rownames(var = "rowID") %>%
+  as.matrix()
+
+# zscore: sample column, transcript row
+com3.fdr0.05.simple_z <- zscore(com3.fdr0.05.simple)
+
+# ************** column annotation
+com3.fdr0.05.simple_t <- com3.fdr0.05.simple %>%
+  t() %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "SampleID")
+
+com3.fdr0.05.simple_t <- com3.fdr0.05.simple_t %>%
+  mutate(Treatment = case_when(grepl("m.dBT.TKD", SampleID) ~ "BTtdk_WT",
+                               grepl("m.dBT.0416", SampleID) ~ "BT0416_KO"))
+
+com3_annGroup <- data.frame(com3.fdr0.05.simple_t$Treatment)
+colnames(com3_annGroup) <- c("Group")
+
+#column color
+com3_annGroup.color <- list("Group" = c("BTtdk_WT" = "#e95d5d", 
+                                         "BT0416_KO" = "#808080"))
+
+com3_colAnn <- HeatmapAnnotation(df = com3_annGroup, which = "col", 
+                                 col = com3_annGroup.color, 
+                                 annotation_width = unit(c(1,2), "cm"), 
+                                 gap = unit(1, "mm"), 
+                                 annotation_name_gp= gpar(fontsize = 5))
+
+# ************** row annotation
+# for row annotation log2FC
+com3_row_log2fc <- com3.fdr0.05.simple_z %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "rowID") %>%
+  left_join(com3.fdr0.05[,c(8,9)]) %>%
+  select(rowID, log2_FC) %>%
+  column_to_rownames(var = "rowID")
+
+com3_rowAnn = rowAnnotation(log2FC = anno_barplot(com3_row_log2fc$log2_FC, 
+                                                  baseline = 0,
+                                                  bar_width = 0.2, 
+                gp = gpar(col = ifelse(com3_row_log2fc$log2_FC >0, "grey", "#e33232"),
+                          fill = ifelse(com3_row_log2fc$log2_FC >0, "grey", "#e33232"))),
+               width = unit(2, "cm") )
+
+## ************** PLOT 
+
+pdf(file = "/Users/min-tinglee/Desktop/RNAseq/20210811_bt0416.RNAseq/Rplot_2022/com3.heatmap.pearson.pdf",height=10, width=6)
+
+Heatmap(com3.fdr0.05.simple_z,
+        #width = ncol(com2.fdr0.05.simple_z)*unit(0.5, "mm"),
+        #height = nrow(com2.fdr0.05.simple_z)*unit(0.5, "mm"),
+        name = "z_counts",
+        clustering_distance_rows = "pearson",
+        col = colorRamp2(c(-2,0,2), c("navy", "white","firebrick3")),
+        row_names_gp = grid::gpar(fontsize = 1),
+        column_names_gp = grid::gpar(fontsize = 5),
+        top_annotation = com3_colAnn,
+        right_annotation = com3_rowAnn)
+dev.off()
+
+```
+
